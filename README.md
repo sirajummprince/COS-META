@@ -76,7 +76,7 @@ pip install -r requirements.txt
 ### Training
 
 ```bash
-python src/train.py
+python src/main.py
 ```
 
 This will train the model using MAML-style episodes with classification and contrastive losses.
