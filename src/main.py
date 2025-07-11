@@ -58,13 +58,13 @@ def main(dataset_name, seed, device):
     config = {
         ##2-3, 2-5, 3-3, 3-5
         'n_way': 2,  # number of classes per task
-        'k_shot': 3,  # number of support samples per class
+        'k_shot': 1,  # number of support samples per class
         'n_query': 5,  # number of query samples per class
         'n_epochs': 200,
         # Cora has 7 classes, Citeseer has 6, CoraFull 70 classes
-        "train_class_size": 45, # at least number n_way
-        "val_class_size": 15, # at least number n_way
-        "test_class_size": 15, # at least number n_way
+        "train_class_size": 3, # at least number n_way
+        "val_class_size": 2, # at least number n_way
+        "test_class_size": 2, # at least number n_way
         'model_type': 'GNNEncoder', # or 'HighOrderGNNEncoder'
         'batch_size': 10,  # Reduced for memory efficiency
         "CoraFull": {  # 70 classes in total
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     
     # Test on multiple datasets
-    datasets = ['CoraFull']  # Add 'CiteSeer', 'CoraFull' as needed
+    datasets = ['Cora']  # Add 'CiteSeer', 'CoraFull' as needed
     runs = 3
     
     # Initialize results dictionary

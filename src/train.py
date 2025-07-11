@@ -13,13 +13,10 @@ def compute_ho_loss_functional(fmodel, params, buffers, data, task_indices, devi
     ce_criterion = nn.CrossEntropyLoss()
     
     labels, preds = [], []
-    loss = 0.0 
-    task_count = 0
+    losses = []  # Collect losses in a list
     
     # Process each task
     for task_nodes in task_indices:
-        task_count += 1
-
         # Process each node in the current task
         for idx in task_nodes:
             # Create label mapping
@@ -32,12 +29,11 @@ def compute_ho_loss_functional(fmodel, params, buffers, data, task_indices, devi
             _, ego_features, ego_edge_index = get_ego_subgraph(idx, data, num_hops=2, max_nodes=50)
             _, cut_features, cut_edge_index = get_structural_subgraph(idx, data, strategy='high_degree')
 
-
             node_embedding = functional_call(
                 fmodel, (params, buffers), (ego_features.to(device), ego_edge_index.to(device), cut_features.to(device), cut_edge_index.to(device))
             )
             
-            # Handle label mapping (removed duplicate code)
+            # Handle label mapping
             original_label = data.y[idx_item].item()
             if task_label_to_local_idx is not None:
                 label = task_label_to_local_idx[original_label]
@@ -47,17 +43,23 @@ def compute_ho_loss_functional(fmodel, params, buffers, data, task_indices, devi
             labels.append(label)
 
             ce_loss = ce_criterion(node_embedding, torch.tensor([label], device=device))
-            loss += ce_loss
+            losses.append(ce_loss)
 
             # For evaluation, compute predictions
             if return_pred:
                 pred = node_embedding.argmax().item()
                 preds.append(pred)
     
+    # Sum all losses
+    if len(losses) > 0:
+        total_loss = torch.stack(losses).mean()
+    else:
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    
     if return_pred:
-        return loss/task_count, preds, labels
+        return total_loss, preds, labels
 
-    return loss/task_count
+    return total_loss
 
 # Compute the loss (cross-entropy + contrastive) using functional model call
 def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task_indices, config, device, return_pred=False):
@@ -80,12 +82,10 @@ def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task
     
     labels = []
     preds = []
+    losses = []  # Collect losses in a list
     
-    loss = torch.tensor(0.0, device=device)
-    task_count = 0
     # Process each task
     for task_nodes in task_indices:
-        task_count +=1
         # Process each node in the current task
         for idx in task_nodes:
             # Create label mapping
@@ -116,13 +116,21 @@ def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task
             
             labels.append(label)
 
-            ce_loss = ce_criterion(target_node_emb, torch.tensor(label, device=device))
+            # Ensure target_node_emb has correct shape
+            if target_node_emb.dim() == 1:
+                target_node_emb = target_node_emb.unsqueeze(0)
+            
+            ce_loss = ce_criterion(target_node_emb, torch.tensor([label], device=device))
 
             # For evaluation, compute predictions
             if return_pred:
-                pred = target_node_emb.argmax().item()
+                pred = target_node_emb.argmax(dim=-1).item()
                 preds.append(pred)
+                losses.append(ce_loss)  # Still need to track loss for evaluation
                 continue  # Skip contrastive loss computation during evaluation
+            
+            # Initialize contrastive loss
+            cl_loss = torch.tensor(0.0, device=device, requires_grad=True)
             
             # Contrastive learning setup
             if graph_embedding is not None:
@@ -136,78 +144,78 @@ def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task
                 if idx_item in positive_indices:
                     positive_indices.remove(idx_item)
                 
-                if len(positive_indices) == 0:
-                    continue  # No positive samples available
-                
-                # Pick a random positive example
-                positive_idx = random.choice(positive_indices)
-                _, pos_ego_features, pos_ego_edge_index = get_ego_subgraph(positive_idx, data)
-                _, pos_graph_embedding = functional_call(
-                    fmodel, (params, buffers),
-                    (pos_ego_features.to(device), pos_ego_edge_index.to(device))
-                )
-                pos_graph_embedding = F.normalize(pos_graph_embedding, p=2, dim=-1)
-                
-                # Find negative samples: different class
-                diff_class_mask = data.y[task_nodes] != data.y[idx_item]
-                negative_indices = task_nodes[diff_class_mask]
-                
-                if len(negative_indices) == 0:
-                    continue  # No negative samples available
-                
-                # Hard Negative Mining
-                max_neg_samples = config[dataset_name]['max_negative_samples']
-                n_neg = min(len(negative_indices), max_neg_samples)
-                
-                # Batch compute negative embeddings
-                negative_graph_embeddings = []
-                for neg_idx in negative_indices[:n_neg]:
-                    neg_idx_item = neg_idx.item() if torch.is_tensor(neg_idx) else neg_idx
-                    neg_subgraph_idx, neg_ego_features, neg_ego_edge_index = get_ego_subgraph(neg_idx_item, data)
-                    _, neg_graph_embedding = functional_call(
+                if len(positive_indices) > 0:
+                    # Pick a random positive example
+                    positive_idx = random.choice(positive_indices)
+                    _, pos_ego_features, pos_ego_edge_index = get_ego_subgraph(positive_idx, data)
+                    _, pos_graph_embedding = functional_call(
                         fmodel, (params, buffers),
-                        (neg_ego_features.to(device), neg_ego_edge_index.to(device))
+                        (pos_ego_features.to(device), pos_ego_edge_index.to(device))
                     )
-                    neg_graph_embedding = F.normalize(neg_graph_embedding, p=2, dim=-1)
-                    negative_graph_embeddings.append(neg_graph_embedding)
-                
-                if len(negative_graph_embeddings) == 0:
-                    continue
-                
-                negative_graph_embeddings = torch.vstack(negative_graph_embeddings)
-                
-                # Ensure proper dimensions
-                if graph_embedding.dim() == 1:
-                    graph_embedding = graph_embedding.unsqueeze(0)
-                if pos_graph_embedding.dim() == 1:
-                    pos_graph_embedding = pos_graph_embedding.unsqueeze(0)
-                
-                # Hard negative mining: select hardest negatives
-                sim_vec = F.cosine_similarity(graph_embedding, negative_graph_embeddings, dim=1)
-                min_neg_samples = config[dataset_name]['min_negative_samples']
-                k = min(min_neg_samples, sim_vec.size(0))
-                
-                if k > 0:
-                    topk_sim, topk_idx = torch.topk(sim_vec, k=k, largest=True)
-                    hardest_negatives = negative_graph_embeddings[topk_idx]
+                    pos_graph_embedding = F.normalize(pos_graph_embedding, p=2, dim=-1)
                     
-                    # Expand anchor and positive to match number of negatives
-                    anchor_expanded = graph_embedding.expand(k, -1)
-                    positive_expanded = pos_graph_embedding.expand(k, -1)
+                    # Find negative samples: different class
+                    diff_class_mask = data.y[task_nodes] != data.y[idx_item]
+                    negative_indices = task_nodes[diff_class_mask]
                     
-                    cl_loss = contrastive_loss(
-                            anchor_expanded, positive_expanded, hardest_negatives, 
-                            float(config[dataset_name]['temperature'])
-                        )
-                else:
-                    cl_loss  = torch.tensor(0.0, device=device)
+                    if len(negative_indices) > 0:
+                        # Hard Negative Mining
+                        max_neg_samples = config[dataset_name]['max_negative_samples']
+                        n_neg = min(len(negative_indices), max_neg_samples)
+                        
+                        # Batch compute negative embeddings
+                        negative_graph_embeddings = []
+                        for neg_idx in negative_indices[:n_neg]:
+                            neg_idx_item = neg_idx.item() if torch.is_tensor(neg_idx) else neg_idx
+                            neg_subgraph_idx, neg_ego_features, neg_ego_edge_index = get_ego_subgraph(neg_idx_item, data)
+                            _, neg_graph_embedding = functional_call(
+                                fmodel, (params, buffers),
+                                (neg_ego_features.to(device), neg_ego_edge_index.to(device))
+                            )
+                            neg_graph_embedding = F.normalize(neg_graph_embedding, p=2, dim=-1)
+                            negative_graph_embeddings.append(neg_graph_embedding)
+                        
+                        if len(negative_graph_embeddings) > 0:
+                            negative_graph_embeddings = torch.vstack(negative_graph_embeddings)
+                            
+                            # Ensure proper dimensions
+                            if graph_embedding.dim() == 1:
+                                graph_embedding = graph_embedding.unsqueeze(0)
+                            if pos_graph_embedding.dim() == 1:
+                                pos_graph_embedding = pos_graph_embedding.unsqueeze(0)
+                            
+                            # Hard negative mining: select hardest negatives
+                            sim_vec = F.cosine_similarity(graph_embedding, negative_graph_embeddings, dim=1)
+                            min_neg_samples = config[dataset_name]['min_negative_samples']
+                            k = min(min_neg_samples, sim_vec.size(0))
+                            
+                            if k > 0:
+                                topk_sim, topk_idx = torch.topk(sim_vec, k=k, largest=True)
+                                hardest_negatives = negative_graph_embeddings[topk_idx]
+                                
+                                # Expand anchor and positive to match number of negatives
+                                anchor_expanded = graph_embedding.expand(k, -1)
+                                positive_expanded = pos_graph_embedding.expand(k, -1)
+                                
+                                cl_loss = contrastive_loss(
+                                    anchor_expanded, positive_expanded, hardest_negatives, 
+                                    float(config[dataset_name]['temperature'])
+                                )
             
-            loss += ce_loss + cl_loss
+            # Combine losses
+            total_node_loss = ce_loss + cl_loss
+            losses.append(total_node_loss)
+    
+    # Sum all losses
+    if len(losses) > 0:
+        total_loss = torch.stack(losses).mean()
+    else:
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
     
     if return_pred:
-        return loss, preds, labels
+        return total_loss, preds, labels
 
-    return loss/task_count
+    return total_loss
 
 
 def meta_training_step(model, dataset_name, data, tasks, optimizer, config, device):
@@ -224,11 +232,14 @@ def meta_training_step(model, dataset_name, data, tasks, optimizer, config, devi
         device: Device to run on
     """
     model.train()
+    
+    # Ensure all model parameters require gradients
+    for param in model.parameters():
+        param.requires_grad = True
         
     # Extract support and query indices
     support_indices = [task['support'] for task in tasks]
     query_indices = [task['query'] for task in tasks]
-    
     
     # Get model parameters and buffers
     params = OrderedDict(model.named_parameters())
@@ -246,7 +257,6 @@ def meta_training_step(model, dataset_name, data, tasks, optimizer, config, devi
     # Inner loop: Fast adaptation on support sets
     for step in range(inner_steps):
         # Compute loss on support set
-
         if config['model_type'] == "GNNEncoder":
             support_loss = compute_cl_loss_functional(
                 model, fast_params, buffers, dataset_name, data, support_indices,
@@ -257,7 +267,6 @@ def meta_training_step(model, dataset_name, data, tasks, optimizer, config, devi
                 model, fast_params, buffers, data, 
                 support_indices, device
             )
-
 
         # Compute gradients w.r.t. fast_params (enable second-order gradients)
         grads = torch.autograd.grad(
@@ -286,10 +295,10 @@ def meta_training_step(model, dataset_name, data, tasks, optimizer, config, devi
             config, device
         )
     else:
-        query_loss =  compute_ho_loss_functional(
-                model, fast_params, buffers, data, 
-                query_indices, device
-            )
+        query_loss = compute_ho_loss_functional(
+            model, fast_params, buffers, data, 
+            query_indices, device
+        )
     
     # Meta-update
     optimizer.zero_grad()
@@ -358,7 +367,6 @@ def meta_test_step(model, dataset_name, data, tasks, config, device):
     
     # Evaluation on query set
     with torch.no_grad():
-
         if config['model_type'] == "GNNEncoder":
             query_loss, preds, true_labels = compute_cl_loss_functional(
                 model, fast_params, buffers, dataset_name, data, query_indices,
@@ -368,7 +376,7 @@ def meta_test_step(model, dataset_name, data, tasks, config, device):
         else:
             query_loss, preds, true_labels = compute_ho_loss_functional(
                 model, fast_params, buffers, data, 
-                support_indices, device, 
+                query_indices, device,  # Fixed: was using support_indices
                 return_pred=True
             )
     
