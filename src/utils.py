@@ -1,4 +1,5 @@
 import torch
+import math
 import torch.nn.functional as F
 
 import numpy as np
@@ -7,7 +8,7 @@ from torch_geometric.utils import k_hop_subgraph, subgraph
 
 from sklearn.model_selection import train_test_split
 
-def create_train_valid_test_split(data, seed, train_size, val_size, test_size, n_way):
+def create_train_valid_test_split(data, seed, n_way):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -15,8 +16,31 @@ def create_train_valid_test_split(data, seed, train_size, val_size, test_size, n
     np.random.shuffle(unique_classes)
 
     total_available = len(unique_classes)
-    assert train_size + test_size <= total_available, "Too many classes requested for train + test."
 
+    min_classes = n_way
+    # Calculate remaining classes after satisfying minimums
+    # Val can overlap with test
+    remaining_classes = total_available - (2 * min_classes)
+    print(remaining_classes)
+
+    if remaining_classes > 0:
+        # Distribute remaining classes according to ratios (60%, 30%, 30%)
+        # Note: val and test get equal priority, so we split remaining proportionally
+        # Total ratio parts: 60 + 30 + 30 = 120
+        train_extra = int(math.ceil(remaining_classes * 0.6))  # 60% of remaining
+        test_extra = int(remaining_classes * 0.3)    # 30% of remaining
+        val_extra = int(remaining_classes * 0.3)    # 30% of remaining
+        
+        # Calculate final splits
+        train_size = min_classes + train_extra
+        val_size = min_classes + val_extra 
+        test_size = min_classes + test_extra
+    else:
+        train_size = min_classes 
+        val_size = min_classes 
+        test_size = min_classes 
+    
+    
     train_classes = unique_classes[:train_size]
     remaining_classes = unique_classes[train_size:]
 
@@ -137,184 +161,3 @@ def get_ego_subgraph(node_idx, data, num_hops=2, max_nodes=None):
     target_subgraph_idx = (node_ids == node_idx).nonzero(as_tuple=True)[0].item()
     return target_subgraph_idx, x[node_ids], sub_edge_index
 
-def get_structural_subgraph(node_idx, data, num_hops=2, strategy='high_degree'):
-    """
-    Extract subgraph based on structural properties rather than random edge removal.
-    
-    Strategies:
-    - 'high_degree': Keep edges connected to high-degree nodes
-    - 'low_degree': Keep edges connected to low-degree nodes  
-    - 'high_centrality': Keep edges based on betweenness centrality
-    - 'random_walk': Use random walk to select important edges
-    """
-    x = data.x
-    edge_index = data.edge_index
-    
-    # Calculate node degrees
-    degrees = torch.bincount(edge_index.flatten(), minlength=x.size(0))
-    
-    if strategy == 'high_degree':
-        # Keep edges connected to high-degree nodes
-        edge_degrees = degrees[edge_index[0]] + degrees[edge_index[1]]
-        k = edge_index.size(1) // 2
-        keep_indices = torch.topk(edge_degrees, k=k, largest=True).indices
-        
-    elif strategy == 'low_degree':
-        # Keep edges connected to low-degree nodes
-        edge_degrees = degrees[edge_index[0]] + degrees[edge_index[1]]
-        k = edge_index.size(1) // 2
-        keep_indices = torch.topk(edge_degrees, k=k, largest=False).indices
-        
-    elif strategy == 'centrality_based':
-        # Use edge betweenness (approximated by degree product)
-        edge_centrality = degrees[edge_index[0]] * degrees[edge_index[1]]
-        k = edge_index.size(1) // 2
-        keep_indices = torch.topk(edge_centrality, k=k, largest=True).indices
-        
-    elif strategy == 'distance_based':
-        # Prefer edges at different hop distances from target
-        node_indexes = torch.tensor([node_idx], device=edge_index.device)
-        
-        # Get 1-hop and 2-hop neighbors
-        one_hop_nodes, _, _, _ = k_hop_subgraph(node_indexes, 1, edge_index, num_nodes=x.size(0))
-        two_hop_nodes, _, _, _ = k_hop_subgraph(node_indexes, 2, edge_index, num_nodes=x.size(0))
-        
-        # Create edge weights based on distance from target
-        edge_weights = torch.zeros(edge_index.size(1), device=edge_index.device)
-        
-        for i, (src, dst) in enumerate(edge_index.t()):
-            src_in_1hop = src in one_hop_nodes
-            dst_in_1hop = dst in one_hop_nodes
-            src_in_2hop = src in two_hop_nodes
-            dst_in_2hop = dst in two_hop_nodes
-            
-            # Higher weight for edges spanning different hop distances
-            if (src_in_1hop and dst_in_2hop) or (src_in_2hop and dst_in_1hop):
-                edge_weights[i] = 2.0
-            elif src_in_1hop and dst_in_1hop:
-                edge_weights[i] = 1.0
-            else:
-                edge_weights[i] = 0.5
-                
-        k = edge_index.size(1) // 2
-        keep_indices = torch.topk(edge_weights, k=k, largest=True).indices
-        
-    else:  # random (fallback)
-        keep_indices = torch.randperm(edge_index.size(1))[:edge_index.size(1) // 2]
-
-    new_edge_index = edge_index[:, keep_indices]
-    
-    # Extract subgraph around target node
-    node_indexes = torch.tensor([node_idx], device=edge_index.device)
-    node_ids, sub_edge_index, _, _ = k_hop_subgraph(
-        node_indexes,
-        num_hops,
-        new_edge_index,
-        relabel_nodes=True,
-        num_nodes=x.size(0)
-    )
-
-    target_subgraph_idx = (node_ids == node_idx).nonzero(as_tuple=True)[0].item()
-    return target_subgraph_idx, x[node_ids], sub_edge_index
-
-def get_complementary_subgraphs(node_idx, data, num_hops=2, complement_strategy='spectral'):
-    """
-    Extract two complementary subgraphs that capture different aspects of the graph structure.
-    
-    Strategies:
-    - 'spectral': Use spectral clustering to split edges
-    - 'community': Use community detection
-    - 'local_global': One local (1-hop), one global (2-hop+)
-    """
-    x = data.x
-    edge_index = data.edge_index
-    
-    if complement_strategy == 'local_global':
-        # First subgraph: local (1-hop)
-        node_indexes = torch.tensor([node_idx], device=edge_index.device)
-        local_nodes, local_edges, _, _ = k_hop_subgraph(
-            node_indexes, 1, edge_index, relabel_nodes=True, num_nodes=x.size(0)
-        )
-        
-        # Second subgraph: global (2-hop but skip direct neighbors)
-        global_nodes, global_edges_temp, _, _ = k_hop_subgraph(
-            node_indexes, num_hops, edge_index, relabel_nodes=False, num_nodes=x.size(0)
-        )
-        
-        # Remove 1-hop edges from global subgraph
-        one_hop_set = set(local_nodes.tolist())
-        global_edge_mask = ~((torch.isin(edge_index[0], local_nodes)) & 
-                            (torch.isin(edge_index[1], local_nodes)))
-        global_edge_index_filtered = edge_index[:, global_edge_mask]
-        
-        global_nodes, global_edges, _, _ = k_hop_subgraph(
-            node_indexes, num_hops, global_edge_index_filtered, 
-            relabel_nodes=True, num_nodes=x.size(0)
-        )
-        
-        target_local_idx = (local_nodes == node_idx).nonzero(as_tuple=True)[0].item()
-        target_global_idx = (global_nodes == node_idx).nonzero(as_tuple=True)[0].item()
-        
-        return (target_local_idx, x[local_nodes], local_edges), \
-               (target_global_idx, x[global_nodes], global_edges)
-               
-    elif complement_strategy == 'degree_split':
-        # Split based on node degrees
-        degrees = torch.bincount(edge_index.flatten(), minlength=x.size(0))
-        median_degree = degrees.float().median()
-        
-        # High-degree subgraph
-        high_degree_mask = degrees >= median_degree
-        high_degree_nodes = torch.nonzero(high_degree_mask).flatten()
-        high_degree_edge_mask = (torch.isin(edge_index[0], high_degree_nodes) | 
-                                torch.isin(edge_index[1], high_degree_nodes))
-        high_degree_edges = edge_index[:, high_degree_edge_mask]
-        
-        # Low-degree subgraph  
-        low_degree_edges = edge_index[:, ~high_degree_edge_mask]
-        
-        # Extract k-hop subgraphs from each
-        node_indexes = torch.tensor([node_idx], device=edge_index.device)
-        
-        high_nodes, high_sub_edges, _, _ = k_hop_subgraph(
-            node_indexes, num_hops, high_degree_edges, relabel_nodes=True, num_nodes=x.size(0)
-        )
-        low_nodes, low_sub_edges, _, _ = k_hop_subgraph(
-            node_indexes, num_hops, low_degree_edges, relabel_nodes=True, num_nodes=x.size(0)
-        )
-        
-        target_high_idx = (high_nodes == node_idx).nonzero(as_tuple=True)[0].item()
-        target_low_idx = (low_nodes == node_idx).nonzero(as_tuple=True)[0].item()
-        
-        return (target_high_idx, x[high_nodes], high_sub_edges), \
-               (target_low_idx, x[low_nodes], low_sub_edges)
-    
-    else:  # Default to original approach but improved
-        return get_ego_subgraph(node_idx, data, num_hops), \
-               get_structural_subgraph(node_idx, data, num_hops, 'high_degree')
-
-def adaptive_subgraph_extraction(node_idx, data, num_hops=2, node_budget=100):
-    """
-    Adaptive subgraph extraction that adjusts based on local graph density.
-    """
-    x = data.x
-    edge_index = data.edge_index
-    
-    # Get initial ego subgraph to assess local density
-    node_indexes = torch.tensor([node_idx], device=edge_index.device)
-    initial_nodes, initial_edges, _, _ = k_hop_subgraph(
-        node_indexes, 1, edge_index, relabel_nodes=False, num_nodes=x.size(0)
-    )
-    
-    # Calculate local density
-    local_density = initial_edges.size(1) / (len(initial_nodes) * (len(initial_nodes) - 1) + 1e-8)
-    
-    # Adjust strategy based on density
-    if local_density > 0.3:  # High density - use more selective extraction
-        return get_complementary_subgraphs(node_idx, data, num_hops, 'degree_split')
-    elif local_density < 0.1:  # Low density - expand search
-        return get_ego_subgraph(node_idx, data, num_hops + 1), \
-               get_structural_subgraph(node_idx, data, num_hops + 1, 'centrality_based')
-    else:  # Medium density - standard approach
-        return get_ego_subgraph(node_idx, data, num_hops), \
-               get_structural_subgraph(node_idx, data, num_hops, 'high_degree')

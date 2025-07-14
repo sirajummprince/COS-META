@@ -57,14 +57,10 @@ def main(dataset_name, seed, device):
     # Configuration
     config = {
         ##2-3, 2-5, 3-3, 3-5
-        'n_way': 2,  # number of classes per task
+        'n_way': 5,  # number of classes per task
         'k_shot': 1,  # number of support samples per class
         'n_query': 5,  # number of query samples per class
-        'n_epochs': 200,
-        # Cora has 7 classes, Citeseer has 6, CoraFull 70 classes
-        "train_class_size": 3, # at least number n_way
-        "val_class_size": 2, # at least number n_way
-        "test_class_size": 2, # at least number n_way
+        'n_epochs': 1000,
         'model_type': 'GNNEncoder', # or 'HighOrderGNNEncoder'
         'batch_size': 10,  # Reduced for memory efficiency
         "CoraFull": {  # 70 classes in total
@@ -77,7 +73,7 @@ def main(dataset_name, seed, device):
             'n_test_tasks': 400,
             "max_negative_samples": 6,
             "min_negative_samples": 3,
-            "inner_steps": 5, 
+            "inner_steps": 20, 
             "lr_inner": 0.01,  
             "patience": 10,
             "temperature": 0.1,
@@ -114,13 +110,9 @@ def main(dataset_name, seed, device):
         }
     }
 
-    
     # Split classes into train, validation, and test
     train_classes, val_classes, test_classes = create_train_valid_test_split(
         data, seed,
-        config['train_class_size'],
-        config['val_class_size'],
-        config['test_class_size'],
         config['n_way']
     )
 
@@ -245,7 +237,7 @@ def main(dataset_name, seed, device):
         epoch_query_loss /= max(1, n_batches)
 
         # Validation
-        if (epoch + 1) % 5 == 0 or epoch == 0:
+        if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"\nEpoch {epoch+1}/{config['n_epochs']}")
             print(f"Train - Support Loss: {epoch_support_loss:.4f}, Query Loss: {epoch_query_loss:.4f}")
 
@@ -385,7 +377,7 @@ def main(dataset_name, seed, device):
     training_history['test_time'] = float(test_time)
     training_history['total_time'] = float(total_time)
 
-    return avg_test_acc, training_history
+    return avg_test_acc, training_history 
 
 
 if __name__ == "__main__":
@@ -406,7 +398,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     
     # Test on multiple datasets
-    datasets = ['Cora']  # Add 'CiteSeer', 'CoraFull' as needed
+    datasets = ['CoraFull']  # Add 'CiteSeer', 'CoraFull' as needed
     runs = 3
     
     # Initialize results dictionary
@@ -442,6 +434,11 @@ if __name__ == "__main__":
             for run in range(runs):
                 print(f"\n--- Run {run + 1}/{runs} ---")
                 run_start_time = time.time()
+
+                # Clear GPU cache at the start
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
                 
                 test_acc, training_history = main(dataset_name, seed + run, device)
                 

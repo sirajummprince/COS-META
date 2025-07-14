@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-07-11 18:46:00",
+  "total_experiment_time": 2065.1363978385925,
+  "summary": {
+    "CiteSeer": {
+      "mean_accuracy": 0.5825,
+      "std_accuracy": 0.027613402542968107,
+      "runs": 3,
+      "total_dataset_time": 2065.13636136055,
+      "average_run_time": 688.3787361780802
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-07-12 20:28:32",
+  "total_experiment_time": 44174.99258804321,
+  "summary": {
+    "CoraFull": {
+      "mean_accuracy": 0.21493333333333334,
+      "std_accuracy": 0.01273874230666259,
+      "runs": 3,
+      "total_dataset_time": 44174.992547512054,
+      "average_run_time": 14724.997445583344
+    }
+  }
+}
