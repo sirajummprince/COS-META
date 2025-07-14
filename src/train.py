@@ -27,6 +27,8 @@ def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task
     """
     ce_criterion = torch.nn.CrossEntropyLoss()
     
+    data = data.to(device)
+
     labels = []
     preds = []
     losses = []  # Collect losses in a list
@@ -35,6 +37,8 @@ def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task
     for task_nodes in task_indices:
         # Process each node in the current task
         for idx in task_nodes:
+            task_nodes = task_nodes.to(device)
+
             # Create label mapping
             all_labels = data.y[task_nodes].tolist()
             task_labels = sorted(set(all_labels))
@@ -67,7 +71,7 @@ def compute_cl_loss_functional(fmodel, params, buffers, dataset_name, data, task
             if target_node_emb.dim() == 1:
                 target_node_emb = target_node_emb.unsqueeze(0)
             
-            ce_loss = ce_criterion(target_node_emb, torch.tensor([label], device=device))
+            ce_loss = ce_criterion(target_node_emb, torch.tensor([label], dtype=torch.long, device=device))
 
             # For evaluation, compute predictions
             if return_pred:
@@ -179,6 +183,7 @@ def meta_training_step(model, dataset_name, data, tasks, optimizer, config, devi
         device: Device to run on
     """
     model.train()
+    data = data.to(device)
     
     # Ensure all model parameters require gradients
     for param in model.parameters():
@@ -250,6 +255,7 @@ def meta_test_step(model, dataset_name, data, tasks, config, device):
     Perform meta-testing with proper adaptation and evaluation.
     """
     model.eval()
+    data = data.to(device)
     
     # Extract support and query indices
     support_indices = [task['support'] for task in tasks]

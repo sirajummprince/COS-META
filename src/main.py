@@ -14,7 +14,7 @@ from torch_geometric.datasets import Planetoid, CoraFull
 from torch_geometric.utils import to_undirected
 
 from utils import create_tasks, create_train_valid_test_split
-from models import GNNEncoder, HighOrderGNNEncoder
+from models import GNNEncoder
 from train import train, evaluate
 
 import argparse
@@ -60,7 +60,7 @@ def main(dataset_name, seed, device):
         'n_way': 5,  # number of classes per task
         'k_shot': 1,  # number of support samples per class
         'n_query': 5,  # number of query samples per class
-        'n_epochs': 1000,
+        'n_epochs': 10000,
         'model_type': 'GNNEncoder', # or 'HighOrderGNNEncoder'
         'batch_size': 10,  # Reduced for memory efficiency
         "CoraFull": {  # 70 classes in total
@@ -152,21 +152,13 @@ def main(dataset_name, seed, device):
 
 
     # Initialize model and optimizer
-    if config['model_type'] == "GNNEncoder":
-        print("Initializing GNNEncoder...")
-        model = GNNEncoder(
-            config[dataset_name]['input_dim'],
-            config[dataset_name]['hidden_dim'],
-            config['n_way'],
-        ).to(device)
-    else: 
-        print("Initializing HighOrderGNNEncoder...")
-        model = HighOrderGNNEncoder(
-            config[dataset_name]['input_dim'],
-            config[dataset_name]['hidden_dim'],
-            config['n_way'],
-        ).to(device)
-
+    print("Initializing GNNEncoder...")
+    model = GNNEncoder(
+        config[dataset_name]['input_dim'],
+        config[dataset_name]['hidden_dim'],
+        config['n_way'],
+    ).to(device)
+    
     optimizer = Adam(
         model.parameters(),
         lr=config[dataset_name]['learning_rate'],
@@ -237,7 +229,7 @@ def main(dataset_name, seed, device):
         epoch_query_loss /= max(1, n_batches)
 
         # Validation
-        if (epoch + 1) % 10 == 0 or epoch == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"\nEpoch {epoch+1}/{config['n_epochs']}")
             print(f"Train - Support Loss: {epoch_support_loss:.4f}, Query Loss: {epoch_query_loss:.4f}")
 
@@ -434,11 +426,6 @@ if __name__ == "__main__":
             for run in range(runs):
                 print(f"\n--- Run {run + 1}/{runs} ---")
                 run_start_time = time.time()
-
-                # Clear GPU cache at the start
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
                 
                 test_acc, training_history = main(dataset_name, seed + run, device)
                 
